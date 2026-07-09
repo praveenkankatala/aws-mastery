@@ -408,7 +408,3 @@ An error occurred (InsufficientInstanceCapacity) when calling the RunInstances o
 **Prevention:** Use versioned file names (e.g., `app.v2.js`) for static assets instead of relying on invalidations, and set shorter TTLs for content that changes frequently.
 
 ---
-
-### Next Module Suggestion
-Now that global infrastructure, shared responsibility, and delivery models are covered — including hands-on proof via the labs above — the natural next module in the structured learning path is:
-**`01-foundations/02-iam-deep-dive.md`** — Identity and Access Management (users, groups, roles, policies, permission boundaries, and the principle of least privilege) — since IAM is the customer's single largest responsibility inside the Shared Responsibility Model, and every lab above depended on IAM permissions you'll now understand in depth.
