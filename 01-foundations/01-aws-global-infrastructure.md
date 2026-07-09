@@ -1,14 +1,5 @@
 # AWS Global Infrastructure — Regions, AZs, Shared Responsibility & Delivery Models
-
-> **Repository:** `aws-devops-mastery`
-> **Path:** `01-foundations/01-aws-global-infrastructure.md`
-> **Module:** 01 — AWS Cloud Fundamentals
-> **Level:** Foundational (prerequisite for all other modules)
-> **Status:** ✅ Complete
-> **Last verified:** July 2026
-
 ---
-
 ## Table of Contents
 
 1. [High-Level Architecture & Service Flow](#1-high-level-architecture--service-flow)
