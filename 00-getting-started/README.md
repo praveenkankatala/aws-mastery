@@ -1,4 +1,4 @@
-# 00 — Getting Started
+# Getting Started
 
 > **Status:** ✅ Complete
 > **Read this before touching any other module.** Everything else in this repo assumes
