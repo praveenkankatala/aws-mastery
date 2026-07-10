@@ -1,275 +1,445 @@
-# API Gateway — Hands-On Labs
+# Hands-On Labs — SQS · SNS · SES
 
-14 progressive labs. Each one builds on the last. All labs use Docker so they run identically on any machine. Every lab maps to a concept in `README.md` — do them in order the first time through.
+Ten progressive labs. Do them in order — each one builds toward the full production-style pipeline in **Lab 8**. Every lab lists an objective, steps (console + CLI), expected output, and a cleanup note.
 
-**Prerequisites:** Docker + Docker Compose installed, `curl`, `jq` (optional but recommended), `openssl`.
+## 📑 Labs Overview
 
----
-
-## Lab 1 — Environment Setup & Mock Backends
-
-**Goal:** Stand up two "microservices" to route traffic to.
-
-1. Create an isolated network:
-   ```bash
-   docker network create gateway-net
-   ```
-2. Start two mock backend services using `httpbin` (it echoes back request details, perfect for seeing what the gateway actually forwards):
-   ```bash
-   docker run -d --name backend-a --network gateway-net -p 8081:80 kennethreitz/httpbin
-   docker run -d --name backend-b --network gateway-net -p 8082:80 kennethreitz/httpbin
-   ```
-3. **Verify:**
-   ```bash
-   curl http://localhost:8081/get
-   curl http://localhost:8082/get
-   ```
-   You should get a JSON response echoing your request headers back.
-
-**Checkpoint:** Two backend containers running on the same Docker network, reachable directly.
+| # | Lab | Service(s) |
+|---|---|---|
+| 0 | Environment setup | IAM, CLI, boto3 |
+| 1 | Create & use a Standard SQS queue | SQS |
+| 2 | Create & use a FIFO SQS queue | SQS |
+| 3 | Configure a Dead Letter Queue | SQS |
+| 4 | Create an SNS topic + direct subscriptions | SNS |
+| 5 | SNS → SQS fan-out pattern | SNS + SQS |
+| 6 | SNS message filtering | SNS |
+| 7 | Verify identities & send email in SES sandbox | SES |
+| 8 | **Full pipeline:** SNS publish → SQS consume → SES email | SQS + SNS + SES |
+| 9 | Monitoring with CloudWatch alarms | CloudWatch |
+| 10 | Clean up all resources | All |
 
 ---
 
-## Lab 2 — Deploy Your First Gateway (Kong, DB-less)
+## Lab 0 — Environment Setup
 
-**Goal:** Get Kong running in front of your backends with zero database dependency.
-
-1. Create `kong.yml`:
-   ```yaml
-   _format_version: "3.0"
-   services:
-     - name: user-service
-       url: http://backend-a:80
-       routes:
-         - name: user-route
-           paths:
-             - /v1/users
-   ```
-2. Run Kong (see cheatsheet §2 for the full command):
-   ```bash
-   docker run -d --name kong --network gateway-net \
-     -e "KONG_DATABASE=off" \
-     -e "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml" \
-     -e "KONG_ADMIN_LISTEN=0.0.0.0:8001" \
-     -v $(pwd)/kong.yml:/kong/declarative/kong.yml \
-     -p 8000:8000 -p 8001:8001 \
-     kong:latest
-   ```
-3. **Verify routing works:**
-   ```bash
-   curl -i http://localhost:8000/v1/users
-   ```
-   Expect a `200` and a JSON body from `backend-a`, proving the gateway proxied your request to the right upstream.
-
-**Checkpoint:** You've reproduced the exact `Clients → Gateway → Services` diagram from the README, for real.
-
----
-
-## Lab 3 — Path-Based Routing to Multiple Services
-
-**Goal:** Route different paths to different backends (the Routing/Reverse-Proxy function).
-
-1. Extend `kong.yml` with a second service:
-   ```yaml
-   services:
-     - name: user-service
-       url: http://backend-a:80
-       routes:
-         - name: user-route
-           paths: ["/v1/users"]
-     - name: order-service
-       url: http://backend-b:80
-       routes:
-         - name: order-route
-           paths: ["/v1/orders"]
-   ```
-2. Reload config: `curl -X POST http://localhost:8001/config -F config=@kong.yml`
-3. **Verify:**
-   ```bash
-   curl -i http://localhost:8000/v1/users   # → backend-a
-   curl -i http://localhost:8000/v1/orders  # → backend-b
-   ```
-
-**Checkpoint:** Same gateway, same port, two completely different backends — clients never need to know either backend's real address.
-
----
-
-## Lab 4 — JWT Authentication
-
-**Goal:** Reject unauthenticated requests at the gateway, before they ever reach `user-service`.
-
-1. Enable the JWT plugin and create a consumer + credential (see cheatsheet §2).
-2. **Verify a request WITHOUT a token is rejected:**
-   ```bash
-   curl -i http://localhost:8000/v1/users
-   # Expect: 401 Unauthorized
-   ```
-3. Generate a signed JWT using the consumer's secret (use jwt.io debugger locally, or a small script with a JWT library in your language of choice) and retry with:
-   ```bash
-   curl -i http://localhost:8000/v1/users -H "Authorization: Bearer <TOKEN>"
-   # Expect: 200 OK
-   ```
-
-**Checkpoint:** You've centralized auth at the perimeter — `backend-a` never had to implement any login logic.
-
----
-
-## Lab 5 — Rate Limiting
-
-**Goal:** Watch the Token Bucket algorithm reject a client after a threshold.
-
-1. Add the rate-limiting plugin capped at a low number for testing (e.g. 5/minute) — see cheatsheet §2.
-2. **Verify by hammering the endpoint:**
-   ```bash
-   for i in $(seq 1 10); do
-     curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/v1/users
-   done
-   ```
-   Expect the first 5 to return `200`, the rest `429 Too Many Requests`.
-3. Check the response headers on a `429` — note `X-RateLimit-Remaining` and `Retry-After`.
-
-**Checkpoint:** You've protected a backend from being hammered, without writing a single line of rate-limit code in the service itself.
-
----
-
-## Lab 6 — TLS Termination with Nginx
-
-**Goal:** Terminate HTTPS at the edge; backend stays on plain HTTP.
-
-1. Generate a self-signed cert (cheatsheet §4).
-2. Write a minimal `nginx.conf` that listens on 443 with your cert/key and proxies to `backend-a:80`.
-3. Run Nginx (cheatsheet §4).
-4. **Verify:**
-   ```bash
-   curl -k -i https://localhost:8443/
-   ```
-   The `-k` flag skips cert validation since it's self-signed — in production you'd use a CA-signed cert (e.g. via Let's Encrypt) and drop `-k`.
-
-**Checkpoint:** Client-facing traffic is encrypted; internal traffic to `backend-a` stays fast, plain HTTP.
-
----
-
-## Lab 7 — Circuit Breaking (Envoy)
-
-**Goal:** Watch a gateway stop sending traffic to a failing upstream automatically.
-
-1. Write a minimal `envoy.yaml` with an `outlier_detection` block on the cluster pointing to `backend-a`.
-2. Run Envoy (cheatsheet §5).
-3. Kill `backend-a` mid-test: `docker stop backend-a`
-4. **Verify:** send several requests — after a few consecutive failures, Envoy should stop even attempting connections (check `curl -s http://localhost:9901/clusters` for the `outlier_detection` status showing the host ejected).
-5. Restart `backend-a` (`docker start backend-a`) and confirm Envoy re-admits it after its health check window passes.
-
-**Checkpoint:** You've seen a circuit "open" and "close" — the core resiliency pattern that stops one failing service from cascading into a full outage.
-
----
-
-## Lab 8 — Canary / Blue-Green Deployment
-
-**Goal:** Split traffic 90/10 between two backend "versions."
-
-1. Create a Kong upstream with two weighted targets (cheatsheet §9): `backend-a` (weight 90) and `backend-b` (weight 10).
-2. Point `user-service` at the upstream instead of a direct URL.
-3. **Verify the split:**
-   ```bash
-   for i in $(seq 1 100); do curl -s http://localhost:8000/v1/users | jq -r '.origin'; done | sort | uniq -c
-   ```
-   You should see roughly a 90/10 distribution between the two container IPs.
-4. Change the weights to 50/50 and re-run to see the split shift live, with zero downtime and no redeploy.
-
-**Checkpoint:** This is exactly how teams roll out risky changes gradually in production.
-
----
-
-## Lab 9 — Protocol Translation (REST → gRPC)
-
-**Goal:** Accept a REST/JSON call at the edge, forward it as gRPC internally.
-
-1. Use Envoy's `grpc_json_transcoder` filter, pointed at a `.proto` file describing a simple service (e.g. a `Greeter` service with a `SayHello` RPC).
-2. Run a minimal gRPC server implementing that proto (any language — Go/Python/Node all have quick-start gRPC examples).
-3. **Verify:**
-   ```bash
-   curl -X POST http://localhost:10000/say-hello -d '{"name":"world"}'
-   ```
-   Envoy should transcode this JSON POST into a gRPC call and translate the gRPC response back to JSON.
-
-**Checkpoint:** Clients never need to know or care that your backend runs gRPC.
-
----
-
-## Lab 10 — Response Aggregation
-
-**Goal:** One client call → gateway fans out to two services → one combined response.
-
-1. Write a tiny Node.js/Express (or any language) "aggregation gateway" that, on `GET /dashboard`, calls both `backend-a:80/get` and `backend-b:80/get` in parallel (`Promise.all`), then merges both JSON bodies into one response object.
-2. Run it in the same Docker network.
-3. **Verify:**
-   ```bash
-   curl -s http://localhost:<your-port>/dashboard | jq
-   ```
-   Confirm the response contains fields from both backends in a single payload.
-
-**Checkpoint:** This is the pattern behind most "dashboard" or "home screen" APIs that stitch together many microservices for one screen.
-
----
-
-## Lab 11 — Observability: Metrics, Logs, and Tracing
-
-**Goal:** See gateway traffic in Prometheus/Grafana, and trace one request across services.
-
-1. Enable Kong's Prometheus plugin: `curl -i -X POST http://localhost:8001/plugins --data name=prometheus`
-2. Run Prometheus configured to scrape `kong:8001/metrics` (cheatsheet §8), and Grafana pointed at Prometheus as a data source.
-3. Generate some traffic, then open Grafana (`localhost:3000`) and build a simple panel graphing request rate/latency.
-4. Separately, run Zipkin and enable Kong's `zipkin` plugin pointing at it. Send a request, then search for its trace in the Zipkin UI (`localhost:9411`) using the `X-Request-ID` or trace header.
-
-**Checkpoint:** You can now answer "how many requests hit this route in the last hour, and what did request `abc123` actually do end to end?"
-
----
-
-## Lab 12 — Control Plane / Data Plane Split (Kong Hybrid Mode)
-
-**Goal:** Separate "where I configure routes" from "where traffic is actually served."
-
-1. Run one Kong node in `control_plane` role (connects to a Postgres DB) and one or more Kong nodes in `data_plane` role (no DB, they pull config from the control plane over mTLS).
-2. Push a new route via the control plane's Admin API.
-3. **Verify:** the data plane node picks up the new route *without you touching it directly* — confirm by curling the data plane's proxy port and seeing the new route respond, then check its logs to confirm it never touched the Admin API directly.
-
-**Checkpoint:** This is how a single config change safely reaches gateway nodes in multiple regions with zero downtime.
-
----
-
-## Lab 13 — Developer Portal & Monetization
-
-**Goal:** Simulate exposing an API to external developers with tiered quotas.
-
-1. Create two Kong consumers: `free-tier-dev` and `premium-tier-dev`.
-2. Apply a rate-limiting plugin scoped to each consumer individually — 10/day for free tier, unlimited (very high limit) for premium.
-3. Issue an API key to each consumer (`key-auth` plugin).
-4. **Verify:** call the API 11 times as `free-tier-dev` and confirm the 11th call gets throttled, while `premium-tier-dev` sails through the same volume.
-
-**Checkpoint:** This is the mechanism behind every "Free / Pro / Enterprise" public API pricing page you've ever seen.
-
----
-
-## Lab 14 — Backend-for-Frontend (BFF) Pattern
-
-**Goal:** Build two different gateways for the same backend data, each optimized for a different client.
-
-1. Build a minimal **Mobile BFF** (Node/Express) that calls `backend-a` and strips the response down to only 3 essential fields, gzip-compressed.
-2. Build a minimal **Web BFF** that calls the same `backend-a` but returns the full payload plus extra fields the desktop UI needs, and sets a session cookie.
-3. **Verify:**
-   ```bash
-   curl -s http://localhost:<mobile-bff-port>/profile | jq   # small payload
-   curl -s -i http://localhost:<web-bff-port>/profile         # full payload + Set-Cookie header
-   ```
-
-**Checkpoint:** Same underlying service, two purpose-built gateways — proving BFF isn't "duplicate work," it's tailoring the contract to the consumer.
-
----
-
-## Cleanup (run after any lab)
+**Objective:** Get your CLI and Python environment ready.
 
 ```bash
-docker stop $(docker ps -aq)
-docker rm $(docker ps -aq)
-docker network rm gateway-net
+aws configure                     # enter access key, secret key, region (e.g. us-east-1)
+aws sts get-caller-identity       # confirm you're authenticated
+pip install boto3
 ```
+
+Create a working IAM user/role (or use one already scoped) with permissions for `sqs:*`, `sns:*`, `ses:*` for the duration of these labs — tighten to least-privilege afterward using the policies in `commands-cheatsheet.md`.
+
+**Expected output:** `get-caller-identity` returns your Account ID, User ID, and ARN.
+
+---
+
+## Lab 1 — Standard SQS Queue
+
+**Objective:** Create a queue and manually send/receive/delete a message.
+
+**Console:**
+1. Open SQS Console → **Create queue**
+2. Type: **Standard**
+3. Name: `Order-Processing-Queue`
+4. Configuration: **Visibility timeout** = 30 sec, **Message retention** = 4 days (default)
+5. Click **Create queue**
+
+**CLI equivalent:**
+```bash
+aws sqs create-queue --queue-name Order-Processing-Queue \
+  --attributes VisibilityTimeout=30
+
+QUEUE_URL=$(aws sqs get-queue-url --queue-name Order-Processing-Queue --query QueueUrl --output text)
+
+aws sqs send-message --queue-url $QUEUE_URL --message-body '{"order_id": 1001}'
+
+aws sqs receive-message --queue-url $QUEUE_URL --wait-time-seconds 10
+```
+
+**Expected output:** `receive-message` returns your JSON body plus a `ReceiptHandle`. Use it to delete:
+```bash
+aws sqs delete-message --queue-url $QUEUE_URL --receipt-handle "<paste handle>"
+```
+
+**Try it:** Receive the same message twice without deleting it — notice it disappears for the visibility timeout window (30s), then reappears. This *is* the at-least-once guarantee in action.
+
+---
+
+## Lab 2 — FIFO SQS Queue
+
+**Objective:** See strict ordering and exactly-once processing in action.
+
+```bash
+aws sqs create-queue --queue-name Orders.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true
+
+FIFO_URL=$(aws sqs get-queue-url --queue-name Orders.fifo --query QueueUrl --output text)
+
+# Send 3 messages, same MessageGroupId → strict order guaranteed within the group
+aws sqs send-message --queue-url $FIFO_URL --message-body "Order A" --message-group-id "customer-42"
+aws sqs send-message --queue-url $FIFO_URL --message-body "Order B" --message-group-id "customer-42"
+aws sqs send-message --queue-url $FIFO_URL --message-body "Order C" --message-group-id "customer-42"
+
+aws sqs receive-message --queue-url $FIFO_URL --max-number-of-messages 3
+```
+
+**Expected output:** Messages return in the exact order A → B → C (guaranteed only within the same `MessageGroupId`; different groups can interleave).
+
+**Note:** Sending the exact same message body + `MessageGroupId` again within the 5-minute dedup window (with `ContentBasedDeduplication=true`) is silently dropped as a duplicate — try it and confirm only 3 unique messages ever existed.
+
+---
+
+## Lab 3 — Dead Letter Queue (DLQ)
+
+**Objective:** Simulate a failing consumer and watch messages move to a DLQ automatically.
+
+```bash
+# 1. Create the DLQ
+aws sqs create-queue --queue-name Order-Processing-DLQ
+DLQ_ARN=$(aws sqs get-queue-attributes --queue-url \
+  $(aws sqs get-queue-url --queue-name Order-Processing-DLQ --query QueueUrl --output text) \
+  --attribute-names QueueArn --query Attributes.QueueArn --output text)
+
+# 2. Attach it to the source queue with maxReceiveCount=3
+aws sqs set-queue-attributes --queue-url $QUEUE_URL --attributes '{
+  "RedrivePolicy": "{\"deadLetterTargetArn\":\"'"$DLQ_ARN"'\",\"maxReceiveCount\":\"3\"}"
+}'
+
+# 3. Send a "poison pill" message and receive it 3 times WITHOUT deleting it
+aws sqs send-message --queue-url $QUEUE_URL --message-body '{"bad":"data"}'
+for i in 1 2 3; do
+  aws sqs receive-message --queue-url $QUEUE_URL --visibility-timeout 1
+  sleep 2
+done
+
+# 4. Check the DLQ — the message should now be there
+aws sqs receive-message --queue-url $(aws sqs get-queue-url --queue-name Order-Processing-DLQ --query QueueUrl --output text)
+```
+
+**Expected output:** After the 3rd failed receive, the message no longer exists in the source queue and appears in `Order-Processing-DLQ`.
+
+---
+
+## Lab 4 — SNS Topic with Direct Subscriptions
+
+**Objective:** Broadcast a message to email and (optionally) SMS.
+
+```bash
+aws sns create-topic --name User-Signups
+TOPIC_ARN=$(aws sns list-topics --query "Topics[?contains(TopicArn,'User-Signups')].TopicArn" --output text)
+
+aws sns subscribe --topic-arn $TOPIC_ARN --protocol email --notification-endpoint you@example.com
+```
+
+**Manual step:** Check your inbox and click **Confirm subscription** — SNS subscriptions stay `PendingConfirmation` until confirmed (this trips up almost everyone the first time).
+
+```bash
+aws sns publish --topic-arn $TOPIC_ARN --subject "Test" --message "Hello from SNS!"
+```
+
+**Expected output:** An email arrives in your inbox within seconds.
+
+---
+
+## Lab 5 — SNS → SQS Fan-out
+
+**Objective:** One publish, multiple queues receive a copy — the core decoupling pattern.
+
+```bash
+# Create 2 queues
+aws sqs create-queue --queue-name Inventory-Queue
+aws sqs create-queue --queue-name Analytics-Queue
+
+INV_ARN=$(aws sqs get-queue-attributes --queue-url $(aws sqs get-queue-url --queue-name Inventory-Queue --query QueueUrl --output text) --attribute-names QueueArn --query Attributes.QueueArn --output text)
+ANA_ARN=$(aws sqs get-queue-attributes --queue-url $(aws sqs get-queue-url --queue-name Analytics-Queue --query QueueUrl --output text) --attribute-names QueueArn --query Attributes.QueueArn --output text)
+
+# Subscribe both to the topic
+aws sns subscribe --topic-arn $TOPIC_ARN --protocol sqs --notification-endpoint $INV_ARN
+aws sns subscribe --topic-arn $TOPIC_ARN --protocol sqs --notification-endpoint $ANA_ARN
+```
+
+⚠️ **Important:** Unlike email/SMS subscriptions, SQS subscriptions need the queue's **access policy** to explicitly allow the SNS topic to deliver to it. The console does this automatically; via CLI you must attach it yourself — see the "SNS → SQS resource policy" snippet in `commands-cheatsheet.md`. Skipping this is the #1 cause of "I subscribed but no messages arrive" (see `troubleshooting.md`).
+
+```bash
+aws sns publish --topic-arn $TOPIC_ARN --message '{"event":"ORDER_COMPLETED","order_id":1001}'
+
+# Check both queues — each should have received an independent copy
+aws sqs receive-message --queue-url $(aws sqs get-queue-url --queue-name Inventory-Queue --query QueueUrl --output text)
+aws sqs receive-message --queue-url $(aws sqs get-queue-url --queue-name Analytics-Queue --query QueueUrl --output text)
+```
+
+**Expected output:** Both queues contain the *same* message body, wrapped in an SNS envelope (`Type`, `MessageId`, `TopicArn`, `Message`, `Timestamp`, `SignatureVersion`, etc.).
+
+---
+
+## Lab 6 — SNS Message Filtering
+
+**Objective:** Only deliver relevant events to a subscriber instead of everything on the topic.
+
+```bash
+SUB_ARN=$(aws sns list-subscriptions-by-topic --topic-arn $TOPIC_ARN \
+  --query "Subscriptions[?Endpoint=='$INV_ARN'].SubscriptionArn" --output text)
+
+# Only forward messages where status == "shipped"
+aws sns set-subscription-attributes \
+  --subscription-arn $SUB_ARN \
+  --attribute-name FilterPolicy \
+  --attribute-value '{"status": ["shipped"]}'
+
+# This one is filtered OUT (no matching attribute)
+aws sns publish --topic-arn $TOPIC_ARN --message "order created" \
+  --message-attributes '{"status":{"DataType":"String","StringValue":"created"}}'
+
+# This one is filtered IN
+aws sns publish --topic-arn $TOPIC_ARN --message "order shipped" \
+  --message-attributes '{"status":{"DataType":"String","StringValue":"shipped"}}'
+```
+
+**Expected output:** Only the "order shipped" message shows up in the Inventory queue.
+
+---
+
+## Lab 7 — SES Sandbox: Verify & Send
+
+**Objective:** Send your first programmatic email.
+
+```bash
+# Verify a sender AND a recipient address (sandbox requires both)
+aws ses verify-email-identity --email-address sender@example.com
+aws ses verify-email-identity --email-address recipient@example.com
+```
+
+**Manual step:** Click the verification link AWS emails to each address.
+
+```bash
+aws ses get-identity-verification-attributes --identities sender@example.com recipient@example.com
+
+aws ses send-email \
+  --from sender@example.com \
+  --destination "ToAddresses=recipient@example.com" \
+  --message '{"Subject":{"Data":"Hello from SES"},"Body":{"Text":{"Data":"This is a sandbox test email."}}}'
+
+aws ses get-send-quota
+```
+
+**Expected output:** `get-send-quota` shows `Max24HourSend: 200.0`, `MaxSendRate: 1.0` — confirming sandbox mode. The email arrives in the recipient's inbox.
+
+---
+
+## Lab 8 — Full Pipeline: SNS → SQS → SES (Python)
+
+**Objective:** Wire everything together — the architecture diagram from `README.md`, running as real code.
+
+### Prerequisites
+- `Order-Processing-Queue` exists (Lab 1) and is subscribed to `User-Signups` topic (Lab 5, adapted)
+- Sender + recipient verified in SES (Lab 7)
+
+### Step 1 — The Publisher (`sns_publisher.py`)
+Acts as your application backend (e.g. a signup service). Publishes an event that SNS fans out to SQS automatically.
+
+```python
+import boto3
+import json
+
+sns_client = boto3.client('sns', region_name='us-east-1')
+
+TOPIC_ARN = 'arn:aws:sns:us-east-1:123456789012:User-Signups'
+
+def publish_signup_event(user_id, email):
+    message_body = {
+        'event': 'USER_SIGNUP',
+        'user_id': user_id,
+        'email': email
+    }
+    print("Publishing event to SNS...")
+    response = sns_client.publish(
+        TopicArn=TOPIC_ARN,
+        Message=json.dumps(message_body),
+        Subject='New User Registration'
+    )
+    print(f"Message published! MessageId: {response['MessageId']}")
+
+publish_signup_event(user_id='usr_98765', email='newuser@example.com')
+```
+
+### Step 2 — The Worker (`sqs_worker_with_ses.py`)
+Polls SQS, unwraps the SNS envelope, and fires a real welcome email through SES.
+
+```python
+import boto3
+import json
+import time
+from botocore.exceptions import ClientError
+
+sqs_client = boto3.client('sqs', region_name='us-east-1')
+ses_client = boto3.client('ses', region_name='us-east-1')
+
+QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/123456789012/Order-Processing-Queue'
+SENDER_EMAIL = 'verified-sender@example.com'  # must be verified in SES
+
+
+def send_welcome_email(recipient_email, user_id):
+    """Uses AWS SES to send a transactional email."""
+    print(f"Sending welcome email to {recipient_email}...")
+
+    CHARSET = "UTF-8"
+    SUBJECT = "Welcome to Our Platform!"
+
+    BODY_HTML = f"""<html>
+    <head></head>
+    <body>
+      <h1>Welcome aboard!</h1>
+      <p>Thank you for signing up. Your User ID is <strong>{user_id}</strong>.</p>
+      <p>We are thrilled to have you here.</p>
+    </body>
+    </html>"""
+
+    BODY_TEXT = f"Welcome aboard!\nThank you for signing up. Your User ID is {user_id}."
+
+    try:
+        response = ses_client.send_email(
+            Destination={'ToAddresses': [recipient_email]},
+            Message={
+                'Body': {
+                    'Html': {'Charset': CHARSET, 'Data': BODY_HTML},
+                    'Text': {'Charset': CHARSET, 'Data': BODY_TEXT},
+                },
+                'Subject': {'Charset': CHARSET, 'Data': SUBJECT},
+            },
+            Source=SENDER_EMAIL,
+        )
+    except ClientError as e:
+        print(f"SES Error: {e.response['Error']['Message']}")
+        return False
+    else:
+        print(f"Email sent! Message ID: {response['MessageId']}")
+        return True
+
+
+def process_messages():
+    print("Polling SQS queue for messages...")
+
+    while True:
+        response = sqs_client.receive_message(
+            QueueUrl=QUEUE_URL,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=20,       # long polling
+            VisibilityTimeout=45      # gives SES time to respond before retry
+        )
+
+        if 'Messages' not in response:
+            print("No messages in queue. Waiting...")
+            time.sleep(5)
+            continue
+
+        for message in response['Messages']:
+            # Unwrap the SNS envelope inside the SQS message body
+            sns_envelope = json.loads(message['Body'])
+            actual_event = json.loads(sns_envelope['Message'])
+
+            print(f"\n--- Processing Event for User: {actual_event['user_id']} ---")
+
+            email_success = send_welcome_email(
+                recipient_email=actual_event['email'],
+                user_id=actual_event['user_id']
+            )
+
+            if email_success:
+                sqs_client.delete_message(
+                    QueueUrl=QUEUE_URL,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
+                print("Processed and removed message from queue.")
+            else:
+                print("Processing failed — message stays in queue for retry.")
+
+
+if __name__ == "__main__":
+    try:
+        process_messages()
+    except KeyboardInterrupt:
+        print("\nWorker stopped.")
+```
+
+### Step 3 — Run It
+```bash
+# Terminal 1 — start the worker, it waits patiently
+python sqs_worker_with_ses.py
+
+# Terminal 2 — trigger a signup event
+python sns_publisher.py
+```
+
+**Expected output:** Terminal 1 immediately receives the message, unwraps it, sends the email via SES, prints the `MessageId`, and deletes the SQS message.
+
+### Why This Design Is Production-Grade
+- **Failure isolation** — if SES throttles or errors, `email_success = False` and the message is *not* deleted.
+- **Safe automatic retries** — because it wasn't deleted, the message becomes visible again after the 45s `VisibilityTimeout` and gets retried.
+- **DLQ as a safety net** — wire the DLQ from Lab 3 onto this queue; a permanently broken message (e.g. malformed address) lands there after a few attempts instead of looping forever.
+
+---
+
+## Lab 9 — Monitoring with CloudWatch
+
+**Objective:** Get alerted before a silent failure becomes a customer-facing outage.
+
+```bash
+# Alarm if the DLQ ever receives a message (should normally be 0)
+aws cloudwatch put-metric-alarm \
+  --alarm-name DLQ-Has-Messages \
+  --namespace AWS/SQS \
+  --metric-name ApproximateNumberOfMessagesVisible \
+  --dimensions Name=QueueName,Value=Order-Processing-DLQ \
+  --statistic Sum \
+  --period 300 \
+  --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --evaluation-periods 1 \
+  --alarm-actions <SNS_TOPIC_ARN_FOR_ALERTS>
+
+# Alarm if the main queue backs up (consumers falling behind)
+aws cloudwatch put-metric-alarm \
+  --alarm-name Queue-Backlog-High \
+  --namespace AWS/SQS \
+  --metric-name ApproximateNumberOfMessagesVisible \
+  --dimensions Name=QueueName,Value=Order-Processing-Queue \
+  --statistic Average \
+  --period 300 \
+  --threshold 100 \
+  --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 2 \
+  --alarm-actions <SNS_TOPIC_ARN_FOR_ALERTS>
+```
+
+Also monitor SES reputation via `Reputation.BounceRate` / `Reputation.ComplaintRate` in the **SES Console → Reputation dashboard**, or subscribe an SNS topic to bounce/complaint events (see `commands-cheatsheet.md` → configuration sets).
+
+---
+
+## Lab 10 — Clean Up
+
+**Objective:** Avoid leftover resources (SQS/SNS are nearly free at this scale, but good hygiene matters).
+
+```bash
+# Delete queues
+for q in Order-Processing-Queue Order-Processing-DLQ Orders.fifo Inventory-Queue Analytics-Queue; do
+  URL=$(aws sqs get-queue-url --queue-name $q --query QueueUrl --output text 2>/dev/null)
+  [ -n "$URL" ] && aws sqs delete-queue --queue-url $URL
+done
+
+# Delete SNS topic (this also removes its subscriptions)
+aws sns delete-topic --topic-arn $TOPIC_ARN
+
+# Remove CloudWatch alarms
+aws cloudwatch delete-alarms --alarm-names DLQ-Has-Messages Queue-Backlog-High
+
+# SES identities can stay verified for future testing, or remove with:
+aws ses delete-identity --identity sender@example.com
+aws ses delete-identity --identity recipient@example.com
+```
+
+---
+
+**Next:** Something not behaving as expected? Check [`troubleshooting.md`](./troubleshooting.md) before assuming it's a bug — 90% of issues here are permissions or confirmation steps.

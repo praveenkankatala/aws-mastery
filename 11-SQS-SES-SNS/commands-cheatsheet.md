@@ -1,307 +1,439 @@
-# API Gateway — Commands Cheatsheet
+# AWS CLI Commands Cheatsheet — SQS · SNS · SES
 
-Copy-paste reference for everything in `hands-on-labs.md`. Organized by tool/task.
+Quick reference for every command used across the labs, plus IAM policies and boto3 equivalents. All examples assume `us-east-1` — swap the region as needed.
+
+## 📑 Table of Contents
+- [Setup](#setup)
+- [SQS Commands](#sqs-commands)
+- [SNS Commands](#sns-commands)
+- [SES Commands](#ses-commands)
+- [IAM Policy Examples](#iam-policy-examples)
+- [boto3 Quick Reference](#boto3-quick-reference)
 
 ---
 
-## 1. Environment Setup
+## Setup
 
 ```bash
-# Check Docker & Compose are installed
-docker --version
-docker compose version
+# Install AWS CLI v2 (Linux example)
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip && sudo ./aws/install
 
-# Create a shared network all labs will use
-docker network create gateway-net
+# Configure credentials
+aws configure
+# AWS Access Key ID, Secret Access Key, default region (e.g. us-east-1), output format (json)
 
-# Spin up a mock backend service (httpbin echoes back whatever you send it)
-docker run -d --name backend-a --network gateway-net -p 8081:80 kennethreitz/httpbin
-docker run -d --name backend-b --network gateway-net -p 8082:80 kennethreitz/httpbin
+# Verify identity
+aws sts get-caller-identity
 
-# Tear everything down when done
-docker stop $(docker ps -aq) && docker rm $(docker ps -aq)
-docker network rm gateway-net
+# Python SDK
+pip install boto3
 ```
 
 ---
 
-## 2. Kong Gateway (Docker, DB-less mode)
+## SQS Commands
 
+### Create Queues
 ```bash
-# Pull the image
-docker pull kong:latest
+# Standard queue
+aws sqs create-queue --queue-name Order-Processing-Queue
 
-# Run Kong in DB-less (declarative) mode
-docker run -d --name kong \
-  --network gateway-net \
-  -e "KONG_DATABASE=off" \
-  -e "KONG_DECLARATIVE_CONFIG=/kong/declarative/kong.yml" \
-  -e "KONG_PROXY_ACCESS_LOG=/dev/stdout" \
-  -e "KONG_ADMIN_ACCESS_LOG=/dev/stdout" \
-  -e "KONG_PROXY_ERROR_LOG=/dev/stderr" \
-  -e "KONG_ADMIN_ERROR_LOG=/dev/stderr" \
-  -e "KONG_ADMIN_LISTEN=0.0.0.0:8001" \
-  -v $(pwd)/kong.yml:/kong/declarative/kong.yml \
-  -p 8000:8000 -p 8001:8001 \
-  kong:latest
+# FIFO queue (name MUST end in .fifo)
+aws sqs create-queue --queue-name Order-Processing-Queue.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=true
 
-# Reload config after editing kong.yml (DB-less mode)
-curl -X POST http://localhost:8001/config \
-  -F config=@kong.yml
+# FIFO queue with High Throughput Mode
+aws sqs create-queue --queue-name HighThroughput-Queue.fifo \
+  --attributes FifoQueue=true,DeduplicationScope=messageGroup,FifoThroughputLimit=perMessageGroupId
 
-# List all configured services
-curl -s http://localhost:8001/services | jq
+# Queue with visibility timeout + retention configured at creation
+aws sqs create-queue --queue-name My-Queue \
+  --attributes VisibilityTimeout=30,MessageRetentionPeriod=345600
+```
 
-# List all routes
-curl -s http://localhost:8001/routes | jq
+### Inspect & Manage Queues
+```bash
+# List all queues
+aws sqs list-queues
 
-# List all active plugins
-curl -s http://localhost:8001/plugins | jq
+# Get queue URL from name
+aws sqs get-queue-url --queue-name Order-Processing-Queue
 
-# Add a service via Admin API (DB-backed mode only)
-curl -i -X POST http://localhost:8001/services \
-  --data name=user-service \
-  --data url=http://backend-a:80
+# Get every attribute (ARN, message counts, etc.)
+aws sqs get-queue-attributes \
+  --queue-url https://sqs.us-east-1.amazonaws.com/123456789012/Order-Processing-Queue \
+  --attribute-names All
 
-# Add a route to that service
-curl -i -X POST http://localhost:8001/services/user-service/routes \
-  --data paths[]=/v1/users \
-  --data methods[]=GET
+# Update an attribute (e.g. visibility timeout)
+aws sqs set-queue-attributes \
+  --queue-url <QUEUE_URL> \
+  --attributes VisibilityTimeout=45
 
-# Enable rate limiting on a service
-curl -i -X POST http://localhost:8001/services/user-service/plugins \
-  --data name=rate-limiting \
-  --data config.minute=100 \
-  --data config.policy=local
+# Tag a queue
+aws sqs tag-queue --queue-url <QUEUE_URL> --tags Project=MessagingDemo,Env=dev
 
-# Enable JWT auth plugin
-curl -i -X POST http://localhost:8001/services/user-service/plugins \
-  --data name=jwt
+# Purge all messages (irreversible, use with care)
+aws sqs purge-queue --queue-url <QUEUE_URL>
 
-# Create a consumer + JWT credential
-curl -i -X POST http://localhost:8001/consumers --data username=demo-user
-curl -i -X POST http://localhost:8001/consumers/demo-user/jwt
+# Delete the queue entirely
+aws sqs delete-queue --queue-url <QUEUE_URL>
+```
 
-# Check upstream health (if using upstreams/targets, not raw service URL)
-curl -s http://localhost:8001/upstreams/user-upstream/health | jq
+### Send / Receive / Delete Messages
+```bash
+# Send a message (Standard queue)
+aws sqs send-message \
+  --queue-url <QUEUE_URL> \
+  --message-body '{"event":"USER_SIGNUP","user_id":"usr_1"}'
+
+# Send a message to a FIFO queue (requires MessageGroupId)
+aws sqs send-message \
+  --queue-url <FIFO_QUEUE_URL> \
+  --message-body '{"event":"ORDER_PLACED"}' \
+  --message-group-id "orders" \
+  --message-deduplication-id "order-1001"
+
+# Receive messages (long polling, up to 10 at a time)
+aws sqs receive-message \
+  --queue-url <QUEUE_URL> \
+  --max-number-of-messages 10 \
+  --wait-time-seconds 20 \
+  --visibility-timeout 30
+
+# Delete a message after processing (ReceiptHandle from receive-message output)
+aws sqs delete-message \
+  --queue-url <QUEUE_URL> \
+  --receipt-handle "<RECEIPT_HANDLE>"
+
+# Change visibility timeout of an in-flight message
+aws sqs change-message-visibility \
+  --queue-url <QUEUE_URL> \
+  --receipt-handle "<RECEIPT_HANDLE>" \
+  --visibility-timeout 60
+
+# Send in a batch (up to 10 messages, cheaper)
+aws sqs send-message-batch \
+  --queue-url <QUEUE_URL> \
+  --entries file://batch-entries.json
+```
+
+### Dead Letter Queues (DLQ)
+```bash
+# 1. Create the DLQ first
+aws sqs create-queue --queue-name Order-Processing-DLQ
+
+# 2. Get its ARN
+aws sqs get-queue-attributes --queue-url <DLQ_URL> --attribute-names QueueArn
+
+# 3. Attach the DLQ to the source queue via RedrivePolicy
+aws sqs set-queue-attributes \
+  --queue-url <SOURCE_QUEUE_URL> \
+  --attributes '{
+    "RedrivePolicy": "{\"deadLetterTargetArn\":\"<DLQ_ARN>\",\"maxReceiveCount\":\"3\"}"
+  }'
+
+# Redrive messages back from DLQ to source queue (after fixing the bug)
+aws sqs start-message-move-task --source-arn <DLQ_ARN>
 ```
 
 ---
 
-## 3. Testing Requests Through the Gateway
+## SNS Commands
 
+### Topics
 ```bash
-# Basic proxied request (Kong proxy defaults to port 8000)
-curl -i http://localhost:8000/v1/users
+# Create a standard topic
+aws sns create-topic --name User-Signups
 
-# Send a request with a JWT
-curl -i http://localhost:8000/v1/users \
-  -H "Authorization: Bearer <JWT_TOKEN>"
+# Create a FIFO topic (must end in .fifo)
+aws sns create-topic --name Order-Events.fifo \
+  --attributes FifoTopic=true,ContentBasedDeduplication=true
 
-# Hammer an endpoint to trigger rate limiting (100 requests, watch for 429s)
-for i in $(seq 1 120); do
-  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/v1/users
-done | sort | uniq -c
+# List topics
+aws sns list-topics
 
-# Verbose mode to inspect headers added/stripped by the gateway
-curl -v http://localhost:8000/v1/users
+# Delete a topic
+aws sns delete-topic --topic-arn arn:aws:sns:us-east-1:123456789012:User-Signups
 
-# Test with a custom Host header (host-based routing)
-curl -i http://localhost:8000/ -H "Host: api.partner.com"
+# Set a topic attribute (e.g. display name for SMS)
+aws sns set-topic-attributes \
+  --topic-arn <TOPIC_ARN> \
+  --attribute-name DisplayName \
+  --attribute-value "MyApp"
+```
+
+### Subscriptions
+```bash
+# Subscribe an SQS queue (protocol=sqs, endpoint=queue ARN)
+aws sns subscribe \
+  --topic-arn <TOPIC_ARN> \
+  --protocol sqs \
+  --notification-endpoint <SQS_QUEUE_ARN>
+
+# Subscribe an email address (requires manual confirmation via emailed link)
+aws sns subscribe \
+  --topic-arn <TOPIC_ARN> \
+  --protocol email \
+  --notification-endpoint you@example.com
+
+# Subscribe an SMS number
+aws sns subscribe \
+  --topic-arn <TOPIC_ARN> \
+  --protocol sms \
+  --notification-endpoint +15555550123
+
+# Subscribe a Lambda function
+aws sns subscribe \
+  --topic-arn <TOPIC_ARN> \
+  --protocol lambda \
+  --notification-endpoint <LAMBDA_ARN>
+
+# List subscriptions for a topic
+aws sns list-subscriptions-by-topic --topic-arn <TOPIC_ARN>
+
+# Unsubscribe
+aws sns unsubscribe --subscription-arn <SUBSCRIPTION_ARN>
+```
+
+### Message Filtering
+```bash
+# Attach a filter policy to a subscription — only deliver messages
+# where the "status" message attribute equals "shipped"
+aws sns set-subscription-attributes \
+  --subscription-arn <SUBSCRIPTION_ARN> \
+  --attribute-name FilterPolicy \
+  --attribute-value '{"status": ["shipped"]}'
+```
+
+### Publishing
+```bash
+# Publish a plain message
+aws sns publish \
+  --topic-arn <TOPIC_ARN> \
+  --message "New user signed up" \
+  --subject "User Signup Event"
+
+# Publish with message attributes (used for filtering)
+aws sns publish \
+  --topic-arn <TOPIC_ARN> \
+  --message '{"event":"ORDER_SHIPPED","order_id":"1001"}' \
+  --message-attributes '{"status":{"DataType":"String","StringValue":"shipped"}}'
+
+# Publish to a FIFO topic (requires MessageGroupId)
+aws sns publish \
+  --topic-arn <FIFO_TOPIC_ARN> \
+  --message "Order 1001 placed" \
+  --message-group-id "orders" \
+  --message-deduplication-id "order-1001"
+
+# Publish an SMS directly (no topic needed)
+aws sns publish --phone-number +15555550123 --message "Your OTP is 482913"
 ```
 
 ---
 
-## 4. Nginx as a Gateway (TLS Termination + Caching)
+## SES Commands
 
+### Identity Verification
 ```bash
-# Generate a self-signed cert for local TLS testing
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout nginx.key -out nginx.crt \
-  -subj "/CN=localhost"
+# Verify a single email address (sandbox testing)
+aws ses verify-email-identity --email-address you@example.com
 
-# Run Nginx with a mounted config + certs
-docker run -d --name nginx-gw \
-  --network gateway-net \
-  -p 8443:443 \
-  -v $(pwd)/nginx.conf:/etc/nginx/nginx.conf:ro \
-  -v $(pwd)/nginx.crt:/etc/nginx/nginx.crt:ro \
-  -v $(pwd)/nginx.key:/etc/nginx/nginx.key:ro \
-  nginx:latest
+# Verify an entire domain (production — required for DKIM on all addresses)
+aws ses verify-domain-identity --domain example.com
 
-# Reload config without downtime after edits
-docker exec nginx-gw nginx -s reload
+# Set up Easy DKIM for a domain (returns 3 CNAME tokens to add to DNS)
+aws ses verify-domain-dkim --domain example.com
 
-# Test config syntax before reloading (catches typos before they break prod)
-docker exec nginx-gw nginx -t
+# Check verification status
+aws ses get-identity-verification-attributes --identities example.com you@example.com
 
-# Test TLS termination
-curl -k -i https://localhost:8443/
+# List all identities
+aws ses list-identities
 
-# Check cache HIT/MISS headers (if X-Cache-Status configured)
-curl -i https://localhost:8443/products -k | grep -i x-cache
+# Delete an identity
+aws ses delete-identity --identity you@example.com
+```
+
+### Sending Email
+```bash
+# Simple email
+aws ses send-email \
+  --from "verified-sender@example.com" \
+  --destination "ToAddresses=recipient@example.com" \
+  --message '{
+    "Subject": {"Data": "Welcome!"},
+    "Body": {"Text": {"Data": "Thanks for signing up."}}
+  }'
+
+# Raw email (needed for attachments / custom MIME)
+aws ses send-raw-email --raw-message file://raw-email.txt
+
+# Templated bulk email (up to 50 destinations per call)
+aws ses send-bulk-templated-email \
+  --source "verified-sender@example.com" \
+  --template "WelcomeTemplate" \
+  --default-template-data '{"name":"there"}' \
+  --destinations file://bulk-destinations.json
+```
+
+### Quotas, Stats & Configuration Sets
+```bash
+# Check current sandbox/production sending quota + rate
+aws ses get-send-quota
+
+# Check sending statistics (bounces, complaints, rejects)
+aws ses get-send-statistics
+
+# Create a configuration set (for event tracking)
+aws ses create-configuration-set --configuration-set '{"Name":"prod-tracking"}'
+
+# Route bounce/complaint events from a config set to an SNS topic
+aws ses create-configuration-set-event-destination \
+  --configuration-set-name prod-tracking \
+  --event-destination '{
+    "Name": "bounce-complaint-notifications",
+    "Enabled": true,
+    "MatchingEventTypes": ["bounce", "complaint"],
+    "SNSDestination": {"TopicARN": "<TOPIC_ARN>"}
+  }'
+```
+
+### Receiving Email (Inbound)
+```bash
+# Create a receipt rule set
+aws ses create-receipt-rule-set --rule-set-name default-inbound
+
+# Set it as active
+aws ses set-active-receipt-rule-set --rule-set-name default-inbound
+
+# Add a rule that stores incoming mail in S3
+aws ses create-receipt-rule \
+  --rule-set-name default-inbound \
+  --rule '{
+    "Name": "store-support-emails",
+    "Enabled": true,
+    "Recipients": ["support@example.com"],
+    "Actions": [{"S3Action": {"BucketName": "my-inbound-email-bucket"}}]
+  }'
 ```
 
 ---
 
-## 5. Envoy (Circuit Breaking + gRPC Protocol Translation)
+## IAM Policy Examples
 
+### Minimal SQS worker policy
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:123456789012:Order-Processing-Queue"
+    }
+  ]
+}
+```
+
+### Minimal SNS publisher policy
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["sns:Publish"],
+      "Resource": "arn:aws:sns:us-east-1:123456789012:User-Signups"
+    }
+  ]
+}
+```
+
+### Minimal SES sending policy
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"ses:FromAddress": "verified-sender@example.com"}
+      }
+    }
+  ]
+}
+```
+
+### SNS → SQS resource policy (attach to the SQS queue itself)
+This is the piece people most often forget when wiring SNS→SQS by CLI/IaC instead of the console — the queue must explicitly allow the topic to deliver to it.
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowSNSPublish",
+      "Effect": "Allow",
+      "Principal": {"Service": "sns.amazonaws.com"},
+      "Action": "sqs:SendMessage",
+      "Resource": "arn:aws:sqs:us-east-1:123456789012:Order-Processing-Queue",
+      "Condition": {
+        "ArnEquals": {"aws:SourceArn": "arn:aws:sns:us-east-1:123456789012:User-Signups"}
+      }
+    }
+  ]
+}
+```
+Attach it with:
 ```bash
-# Run Envoy with a local config file
-docker run -d --name envoy-gw \
-  --network gateway-net \
-  -p 10000:10000 -p 9901:9901 \
-  -v $(pwd)/envoy.yaml:/etc/envoy/envoy.yaml:ro \
-  envoyproxy/envoy:v1.29-latest
-
-# View Envoy's live admin stats (circuit breaker state, connection pools)
-curl -s http://localhost:9901/stats | grep circuit_breakers
-
-# View cluster health as Envoy sees it
-curl -s http://localhost:9901/clusters
-
-# Force-drain and hot-restart config after editing envoy.yaml
-curl -X POST http://localhost:9901/drain_listeners
-docker restart envoy-gw
-
-# Send a request through Envoy to the backend cluster
-curl -i http://localhost:10000/
+aws sqs set-queue-attributes --queue-url <QUEUE_URL> \
+  --attributes file://sqs-policy.json
 ```
 
 ---
 
-## 6. AWS API Gateway (CLI)
+## boto3 Quick Reference
 
-```bash
-# List existing REST APIs
-aws apigateway get-rest-apis
+```python
+import boto3
 
-# Create a new REST API
-aws apigateway create-rest-api --name "demo-api"
+sqs = boto3.client('sqs', region_name='us-east-1')
+sns = boto3.client('sns', region_name='us-east-1')
+ses = boto3.client('ses', region_name='us-east-1')
 
-# Get the root resource ID (needed to attach methods)
-aws apigateway get-resources --rest-api-id <API_ID>
+# SQS: send
+sqs.send_message(QueueUrl=QUEUE_URL, MessageBody='{"hello":"world"}')
 
-# Create a GET method on the root resource
-aws apigateway put-method \
-  --rest-api-id <API_ID> \
-  --resource-id <RESOURCE_ID> \
-  --http-method GET \
-  --authorization-type NONE
+# SQS: receive + delete
+resp = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1, WaitTimeSeconds=20)
+for msg in resp.get('Messages', []):
+    print(msg['Body'])
+    sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg['ReceiptHandle'])
 
-# Deploy the API to a stage
-aws apigateway create-deployment \
-  --rest-api-id <API_ID> \
-  --stage-name dev
+# SNS: publish
+sns.publish(TopicArn=TOPIC_ARN, Message='Hello subscribers', Subject='Test')
 
-# Create a usage plan (monetization / quotas)
-aws apigateway create-usage-plan \
-  --name "free-tier" \
-  --throttle burstLimit=20,rateLimit=10 \
-  --quota limit=1000,period=DAY
+# SNS: subscribe SQS queue
+sns.subscribe(TopicArn=TOPIC_ARN, Protocol='sqs', Endpoint=QUEUE_ARN)
 
-# Create an API key and associate it with a usage plan
-aws apigateway create-api-key --name "demo-key" --enabled
-aws apigateway create-usage-plan-key \
-  --usage-plan-id <PLAN_ID> \
-  --key-id <KEY_ID> \
-  --key-type API_KEY
+# SES: send email
+ses.send_email(
+    Source='verified-sender@example.com',
+    Destination={'ToAddresses': ['recipient@example.com']},
+    Message={
+        'Subject': {'Data': 'Welcome!'},
+        'Body': {'Text': {'Data': 'Thanks for signing up.'}}
+    }
+)
 ```
 
 ---
 
-## 7. Kubernetes-based Gateways (Ingress / Gateway API)
-
-```bash
-# Apply a Gateway API resource
-kubectl apply -f gateway.yaml
-
-# List Gateways and HTTPRoutes
-kubectl get gateway
-kubectl get httproute
-
-# Describe a route to debug why traffic isn't matching
-kubectl describe httproute user-route
-
-# Check gateway controller logs
-kubectl logs -l app=envoy-gateway -n gateway-system --tail=100 -f
-
-# Port-forward to test locally without an external LB
-kubectl port-forward svc/envoy-gateway 8080:80 -n gateway-system
-```
-
----
-
-## 8. Observability Stack (Prometheus + Grafana + Zipkin)
-
-```bash
-# Run Prometheus scraping the gateway's /metrics endpoint
-docker run -d --name prometheus \
-  --network gateway-net \
-  -p 9090:9090 \
-  -v $(pwd)/prometheus.yml:/etc/prometheus/prometheus.yml:ro \
-  prom/prometheus
-
-# Run Grafana
-docker run -d --name grafana \
-  --network gateway-net \
-  -p 3000:3000 \
-  grafana/grafana
-
-# Run Zipkin for distributed tracing
-docker run -d --name zipkin \
-  --network gateway-net \
-  -p 9411:9411 \
-  openzipkin/zipkin
-
-# Query Prometheus directly for gateway request rate
-curl -s 'http://localhost:9090/api/v1/query?query=rate(kong_http_requests_total[1m])'
-
-# Check a trace by ID in Zipkin
-curl -s http://localhost:9411/api/v2/trace/<TRACE_ID>
-```
-
----
-
-## 9. Canary / Blue-Green Traffic Splitting (Kong Upstream Targets)
-
-```bash
-# Create an upstream (a named load-balanced pool)
-curl -i -X POST http://localhost:8001/upstreams --data name=user-upstream
-
-# Add v1 target with 90% weight
-curl -i -X POST http://localhost:8001/upstreams/user-upstream/targets \
-  --data target=backend-a:80 --data weight=90
-
-# Add v2 (canary) target with 10% weight
-curl -i -X POST http://localhost:8001/upstreams/user-upstream/targets \
-  --data target=backend-b:80 --data weight=10
-
-# Point the service at the upstream instead of a single backend
-curl -i -X PATCH http://localhost:8001/services/user-service \
-  --data host=user-upstream
-
-# Fire 50 requests and count how many hit each version (via a response header each backend sets)
-for i in $(seq 1 50); do curl -s http://localhost:8000/v1/users -o /dev/null -w "%{http_code}\n"; done
-```
-
----
-
-## 10. Quick Diagnostic Commands
-
-```bash
-# Is the gateway container even running?
-docker ps | grep -E "kong|nginx|envoy"
-
-# Tail logs live
-docker logs -f kong
-
-# Check what's actually listening on expected ports
-sudo lsof -i -P -n | grep LISTEN
-
-# DNS resolution check from inside the gateway container (service discovery issues)
-docker exec kong getent hosts backend-a
-
-# Round-trip latency test
-curl -o /dev/null -s -w "DNS: %{time_namelookup}s | Connect: %{time_connect}s | TLS: %{time_appconnect}s | Total: %{time_total}s\n" https://localhost:8443/
-```
+**Tip:** Every command above uses placeholders like `<QUEUE_URL>`, `<TOPIC_ARN>`. Grab the real values from `list-queues` / `list-topics` / the console, or store them as environment variables while working through `hands-on-labs.md`.
