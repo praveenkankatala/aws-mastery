@@ -179,14 +179,6 @@ flowchart LR
 
 ---
 
-## 🧭 Next Steps / Further Exploration
-
-- **Kappa Architecture** — a simplification of Lambda Architecture that removes the batch layer entirely and reprocesses everything through the stream layer, eliminating the dual-codebase problem. (Explored conceptually in `hands-on-labs.md`.)
-- **AWS Step Functions** — orchestration for multi-step Lambda workflows. *Not yet covered — paste that content and this guide will be extended to match the same 4-file structure.*
-- **IAM Permission Design** — precise least-privilege policies for a database-connected Lambda function.
-
----
-
 ## 🔗 Related Docs in This Repo
 
 | File | Contents |
