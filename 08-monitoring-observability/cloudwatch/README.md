@@ -1,64 +1,106 @@
-# Amazon CloudWatch
+# AWS Observability & Governance — CloudWatch + CloudTrail
 
-> **Category:** (fill in)
-> **Status:** 🚧 In Progress
-> **Last updated:** 2026-07-09
+A complete, practical, end-to-end learning repository covering **Amazon CloudWatch** (monitoring & observability) and **AWS CloudTrail** (auditing & governance) — from core concepts to production-grade hands-on labs, CLI cheatsheets, and real-world troubleshooting.
 
----
-
-## Table of Contents
-
-1. [High-Level Architecture & Service Flow](#1-high-level-architecture--service-flow)
-2. [Core Features & Deep-Dive](#2-core-features--deep-dive)
-3. [Step-by-Step Configuration & Implementation Guide](#3-step-by-step-configuration--implementation-guide)
-4. [How to Use & Where to Use (Target Use Cases)](#4-how-to-use--where-to-use-target-use-cases)
-5. [Frequently Missed Details / Gotchas](#5-frequently-missed-details--gotchas)
+> **Who is this for?** DevOps engineers, cloud engineers, SREs, and anyone preparing for AWS interviews or building production monitoring/audit pipelines.
 
 ---
 
-## 1. High-Level Architecture & Service Flow
+## The One-Line Difference
 
-<!-- How does Amazon CloudWatch fit into the bigger picture? What talks to it, what does it talk to?
-     Include a diagram (ASCII, Mermaid, or link to /diagrams) showing request/data flow. -->
+| | Amazon CloudWatch | AWS CloudTrail |
+|---|---|---|
+| **What** | Performance & health monitoring (observability) | API activity recording (governance & audit) |
+| **Answers** | *"Is my CPU pegged? Why is the app throwing 500s?"* | *"WHO changed the Security Group rules at midnight?"* |
+| **Ingests** | Metrics, logs, traces, events | JSON audit records of every AWS API call |
+| **Acts** | Auto Scaling, SNS alerts, Lambda remediation | Security alerts on unauthorized/compliance drift |
 
-## 2. Core Features & Deep-Dive
+**Think of it this way:** CloudWatch is the *dashboard and alarm system* of your car; CloudTrail is the *dashcam* recording who drove it, when, and where.
 
-<!-- Bulleted breakdown: capabilities, limits/quotas, scaling behavior, pricing model,
-     storage/instance/tier types, integration points with other AWS services. -->
+---
 
-- Feature 1:
-- Feature 2:
-- Limits/Quotas:
-- Pricing model:
+## Repository Structure
 
-## 3. Step-by-Step Configuration & Implementation Guide
-
-<!-- Numbered, copy-pasteable steps: console AND CLI/IaC where possible.
-     See ./configs/ for actual working templates used. -->
-
-1. Step one
-2. Step two
-
-```bash
-# example command
-aws cloudwatch help
+```
+aws-observability/
+├── README.md                          <- You are here
+├── cloudwatch/
+│   ├── README.md                      <- What / Why / How, architecture, features, config guide
+│   ├── commands-cheatsheet.md         <- All CloudWatch CLI commands, organized
+│   ├── hands-on-labs.md               <- 10 labs: from first alarm to trace-log correlation
+│   └── troubleshooting.md             <- Common errors, causes, fixes
+└── cloudtrail/
+    ├── README.md                      <- What / Why / How, event types, trail design, security
+    ├── commands-cheatsheet.md         <- All CloudTrail CLI commands, organized
+    ├── hands-on-labs.md               <- 8 labs: from first trail to Athena forensics
+    └── troubleshooting.md             <- Common errors, causes, fixes
 ```
 
-## 4. How to Use & Where to Use (Target Use Cases)
+---
 
-<!-- Decision criteria: when to choose this service over alternatives.
-     A comparison table works well here. -->
+## How They Work Together (End-to-End Flow)
 
-| Criteria | Choose Amazon CloudWatch | Choose Alternative |
-|---|---|---|
-|  |  |  |
+```
+                        ┌──────────────────────────────────────────────┐
+                        │                YOUR AWS ACCOUNT              │
+                        │                                              │
+   User/App API call ──►│  IAM / EC2 / S3 / Lambda / EKS / RDS ...     │
+                        └───────────┬──────────────────┬───────────────┘
+                                    │                  │
+                     (performance   │                  │  (every API call:
+                      data: metrics,│                  │   who / what / when /
+                      logs, traces) │                  │   from where)
+                                    ▼                  ▼
+                        ┌───────────────────┐  ┌───────────────────┐
+                        │  Amazon           │  │  AWS CloudTrail   │
+                        │  CloudWatch       │◄─┤  (streams events  │
+                        │                   │  │   to CW Logs)     │
+                        │ Metrics · Logs ·  │  └─────────┬─────────┘
+                        │ Alarms · X-Ray ·  │            │
+                        │ Dashboards        │            ▼
+                        └───────┬───────────┘  ┌───────────────────┐
+                                │              │  S3 (immutable,   │
+                                ▼              │  encrypted audit  │
+                    ┌───────────────────────┐  │  archive)         │
+                    │ ACT: SNS alerts,      │  └─────────┬─────────┘
+                    │ Auto Scaling, Lambda  │            ▼
+                    │ auto-remediation      │  ┌───────────────────┐
+                    └───────────────────────┘  │ Athena SQL        │
+                                               │ forensics         │
+                                               └───────────────────┘
+```
 
-## 5. Frequently Missed Details / Gotchas
-
-<!-- Things that aren't obvious from the docs, edge cases, "wish I knew this earlier" notes. -->
-
--
+**The complete loop in one incident:**
+1. An engineer runs `aws iam create-user --user-name Alice`.
+2. **CloudTrail** captures the API call (identity, source IP, timestamp) → delivers to S3 + streams to CloudWatch Logs.
+3. A **CloudWatch metric filter** spots the `CreateUser` event → **alarm** fires → **SNS** notifies the security team on Slack.
+4. Meanwhile, **CloudWatch metrics** show a CPU spike on production; the on-call engineer uses **Logs Insights** + **X-Ray traces** to find root cause in minutes.
 
 ---
 
-**Related docs:** [hands-on-labs.md](./hands-on-labs.md) · [commands-cheatsheet.md](./commands-cheatsheet.md) · [troubleshooting.md](./troubleshooting.md)
+## Prerequisites
+
+- An AWS account (Free Tier is sufficient for most labs)
+- AWS CLI v2 installed and configured (`aws configure`)
+- IAM permissions: `CloudWatchFullAccess`, `AWSCloudTrail_FullAccess`, plus S3/SNS/Lambda as needed per lab
+- Basic familiarity with EC2, S3, Lambda, and IAM
+- (Optional) `kubectl` + an EKS cluster for the EKS monitoring lab
+
+---
+
+## Learning Path (Recommended Order)
+
+| Step | Doc | What you'll learn |
+|---|---|---|
+| 1 | [cloudwatch/README.md](cloudwatch/README.md) | The 4-stage pipeline: Collect → Monitor → Act → Analyze |
+| 2 | [cloudwatch/hands-on-labs.md](cloudwatch/hands-on-labs.md) | First alarm → custom metrics → EMF → dashboards → X-Ray |
+| 3 | [cloudtrail/README.md](cloudtrail/README.md) | Event types, multi-region trails, log hardening |
+| 4 | [cloudtrail/hands-on-labs.md](cloudtrail/hands-on-labs.md) | First trail → integrity validation → Athena forensics |
+| 5 | Both `troubleshooting.md` files | Production war stories and fixes |
+| 6 | Both `commands-cheatsheet.md` files | Keep open in a second tab, always |
+
+---
+
+## License & Contributions
+
+Free to use for learning and interview prep. PRs welcome — especially new labs, updated pricing notes, and additional troubleshooting scenarios.
