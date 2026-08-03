@@ -17,7 +17,7 @@ Instead of one giant wall of text, this project is split into four focused docum
 
 ---
 
-## 1. What Is Amazon ElastiCache? (The Plain-English Version)
+## 1. What Is Amazon ElastiCache?
 
 Imagine your application talks to a database (RDS, DynamoDB, whatever). Every read is a round trip: network hop → disk I/O → query engine → data comes back. That's fine at low traffic. At scale, it's slow and expensive — you're paying to recompute or re-fetch the same answer thousands of times a second.
 
