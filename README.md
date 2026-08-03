@@ -27,11 +27,3 @@ guide, and real-world use cases.
 | 09 | Real-World Projects | 🚧 |
 
 Legend: 🚧 In Progress · ✅ Complete · ⏳ Not Started
-
-## How to add a new service
-
-```bash
-./scaffold.sh                     # re-run any time — safe, won't overwrite existing files
-```
-Then edit `scaffold_service` calls in `scaffold.sh`, or manually copy
-`templates/service-notes-template.md` into a new folder.
